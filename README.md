@@ -20,4 +20,4 @@ $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "your-key-password"
 npm run tauri build
 ```
 
-`.moresecrets` should contain only the private-key value, with no label or quotes. The private key currently in this workspace has been exposed and must be replaced with a newly generated key pair before publishing; update `plugins.updater.pubkey` with the new public key.
+`.moresecrets` should contain the raw private-key file contents, including its first `untrusted comment: ...` line and the following `RW...` line. Do not paste a base64-encoded version of the file, add a `tauri secret key:` label, or add quotes. The private key currently in this workspace has been exposed and must be replaced with a newly generated key pair before publishing; update `plugins.updater.pubkey` with the new public key.
