@@ -57,8 +57,10 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const signInWithGoogle = async () => {
-    // redirectTo should match your dev server for OAuth
-    await supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: 'http://localhost:1420' } });
+    await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: `${window.location.origin}` },
+    });
   };
 
   const signOut = async () => {
