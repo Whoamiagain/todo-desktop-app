@@ -10,6 +10,9 @@ jobs:
     permissions:
       contents: write
     runs-on: windows-latest
+    env:
+      VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
     steps:
       - uses: actions/checkout@v5
 
@@ -24,6 +27,13 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Validate release configuration
+        shell: pwsh
+        run: |
+          if (-not $env:VITE_SUPABASE_URL -or -not $env:VITE_SUPABASE_ANON_KEY) {
+            throw 'Set the VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY Actions secrets before creating a release.'
+          }
 
       - name: Build and publish Tauri app
         uses: tauri-apps/tauri-action@v0
