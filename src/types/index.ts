@@ -50,6 +50,45 @@ export interface ProjectTask {
   deleted_at: string | null;
 }
 
+export interface Couple {
+  id: string;
+  user1_id: string;
+  user2_id: string | null;
+  invite_code: string;
+  status?: 'active' | 'unlinked';
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DiaryEntry {
+  id: string;
+  couple_id: string;
+  user_id: string;
+  date: string;
+  encrypted_body: string;
+  iv: string;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface DecryptedDiaryEntry {
+  id: string;
+  couple_id: string;
+  user_id: string;
+  date: string;
+  body: string;
+  is_locked: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DiaryStreak {
+  individualStreak: number;
+  coupleStreak: number;
+  isCoupleStreakTentative: boolean;
+}
+
 export interface DailyHistory {
   id: string;
   user_id: string;

@@ -1,6 +1,6 @@
 import type { OutboxItem } from '../types';
 import { supabase } from './supabase';
-import { selectSql, executeSql } from './localDb';
+import { getActiveCouple, selectSql, executeSql } from './localDb';
 
 export async function queueOfflineChange(tableName: string, recordId: string, action: 'INSERT' | 'UPDATE' | 'DELETE', payload: Record<string, unknown>, updated_at: string): Promise<void> {
   const id = `${Date.now()}-${Math.random()}`;
@@ -9,12 +9,19 @@ export async function queueOfflineChange(tableName: string, recordId: string, ac
 }
 
 export async function pushLocalChanges(): Promise<void> {
+  const activeCouple = await getActiveCouple();
   const rows = await selectSql<OutboxItem>('SELECT id, table_name, record_id, action, payload, updated_at FROM outbox_queue ORDER BY updated_at ASC', []);
 
   for (const row of rows) {
     const payload = JSON.parse(row.payload || '{}');
     const table = row.table_name;
     const recordId = row.record_id;
+
+    if (table === 'diary_entries') {
+      const diaryPayload = payload as { couple_id?: unknown };
+      const coupleId = typeof diaryPayload.couple_id === 'string' ? diaryPayload.couple_id : null;
+      if (!activeCouple || !coupleId || coupleId !== activeCouple.id) continue;
+    }
 
     // fetch remote updated_at
     const { data: remoteData, error: fetchErr } = await supabase.from(table).select('updated_at').eq('id', recordId).maybeSingle();
@@ -33,11 +40,13 @@ export async function pushLocalChanges(): Promise<void> {
       continue;
     }
 
-    // Keep other_tasks explicit so its soft-delete payload follows the same LWW upsert path.
-    const { error: upsertErr } = table === 'other_tasks'
-      ? await supabase.from('other_tasks').upsert(payload as any, { onConflict: 'id' })
-      : await supabase.from(table).upsert(payload as any, { onConflict: 'id' });
-    if (upsertErr) {
+    // Diary payloads remain encrypted strings; sync never decrypts them.
+    const syncResult = row.action === 'DELETE'
+      ? await supabase.from(table).delete().eq('id', recordId)
+      : table === 'other_tasks'
+        ? await supabase.from('other_tasks').upsert(payload as any, { onConflict: 'id' })
+        : await supabase.from(table).upsert(payload as any, { onConflict: 'id' });
+    if (syncResult.error) {
       // leave in outbox for retry
       continue;
     }
@@ -48,6 +57,37 @@ export async function pushLocalChanges(): Promise<void> {
 }
 
 const REMOTE_TABLES = ['daily_tasks', 'weekly_tasks', 'other_tasks', 'projects', 'project_tasks', 'daily_history'];
+
+async function mergeRemoteRecord(table: string, incoming: Record<string, unknown>): Promise<void> {
+  const id = incoming.id as string;
+  const incomingUpdatedAt = incoming.updated_at as string | undefined;
+  if (!id || !incomingUpdatedAt) return;
+
+  const localRows = await selectSql<{ id: string; updated_at: string }>(
+    `SELECT id, updated_at FROM ${table} WHERE id = ?`,
+    [id],
+  );
+  const local = localRows[0];
+
+  if (!local) {
+    const columns = Object.keys(incoming);
+    const placeholders = columns.map(() => '?').join(', ');
+    await executeSql(
+      `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${placeholders})`,
+      columns.map((column) => incoming[column]),
+    );
+    return;
+  }
+
+  if (new Date(incomingUpdatedAt) <= new Date(local.updated_at)) return;
+
+  const columns = Object.keys(incoming);
+  const updates = columns.map((column) => `${column} = ?`).join(', ');
+  await executeSql(
+    `UPDATE ${table} SET ${updates} WHERE id = ?`,
+    [...columns.map((column) => incoming[column]), local.id],
+  );
+}
 
 export async function pullRemoteChanges(userId: string): Promise<void> {
   // get last pull timestamp
@@ -65,37 +105,53 @@ export async function pullRemoteChanges(userId: string): Promise<void> {
     if (!data) continue;
 
     for (const incoming of data as any[]) {
-      const id = incoming.id as string;
-      const incomingUpdatedAt = incoming.updated_at as string | undefined;
-
-      let localRows = await selectSql<{ id: string; updated_at: string }>(`SELECT id, updated_at FROM ${table} WHERE id = ?`, [id]);
-      let local = localRows[0];
-
       // History identity is the user's logical date, not the generated row id.
-      if (!local && table === 'daily_history') {
-        localRows = await selectSql<{ id: string; updated_at: string }>(
+      if (table === 'daily_history') {
+        const localRows = await selectSql<{ id: string; updated_at: string }>(
           'SELECT id, updated_at FROM daily_history WHERE user_id = ? AND date = ?',
           [incoming.user_id, incoming.date],
         );
-        local = localRows[0];
-      }
-
-      if (!local) {
-        // insert incoming row
-        const columns = Object.keys(incoming).join(', ');
-        const placeholders = Object.keys(incoming).map(() => '?').join(', ');
-        const values = Object.values(incoming);
-        await executeSql(`INSERT INTO ${table} (${columns}) VALUES (${placeholders})`, values as unknown[]);
+        const local = localRows[0];
+        if (!local) {
+          const columns = Object.keys(incoming);
+          await executeSql(
+            `INSERT INTO daily_history (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`,
+            columns.map((column) => incoming[column]),
+          );
+        } else if (incoming.updated_at && new Date(incoming.updated_at) > new Date(local.updated_at)) {
+          const columns = Object.keys(incoming);
+          await executeSql(
+            `UPDATE daily_history SET ${columns.map((column) => `${column} = ?`).join(', ')} WHERE id = ?`,
+            [...columns.map((column) => incoming[column]), local.id],
+          );
+        }
         continue;
       }
 
-      const localUpdatedAt = local.updated_at;
-      if (!incomingUpdatedAt) continue;
-      if (new Date(incomingUpdatedAt) > new Date(localUpdatedAt)) {
-        // incoming wins — update local
-        const updates = Object.keys(incoming).map((k) => `${k} = ?`).join(', ');
-        const values = Object.values(incoming);
-        await executeSql(`UPDATE ${table} SET ${updates} WHERE id = ?`, [...(values as unknown[]), local.id]);
+      await mergeRemoteRecord(table, incoming);
+    }
+  }
+
+  const { data: activeCouple, error: coupleError } = await supabase
+    .from('couples')
+    .select('*')
+    .or(`user1_id.eq.${userId},user2_id.eq.${userId}`)
+    .eq('status', 'active')
+    .maybeSingle();
+
+  if (!coupleError && activeCouple) {
+    await mergeRemoteRecord('couples', activeCouple as Record<string, unknown>);
+
+    const activeCoupleId = activeCouple.id as string;
+    const { data: diaryEntries, error: diaryError } = await supabase
+      .from('diary_entries')
+      .select('*')
+      .eq('couple_id', activeCoupleId)
+      .gte('updated_at', lastPull);
+
+    if (!diaryError && diaryEntries) {
+      for (const entry of diaryEntries as Record<string, unknown>[]) {
+        await mergeRemoteRecord('diary_entries', entry);
       }
     }
   }

@@ -14,8 +14,14 @@ export async function checkForUpdates(manual = false): Promise<void> {
   updateCheckInProgress = true;
   if (manual) statusHandler?.('checking');
 
+  let timeoutId: number | undefined;
   try {
-    const update = await check();
+    const update = await Promise.race([
+      check(),
+      new Promise<never>((_, reject) => {
+        timeoutId = window.setTimeout(() => reject(new Error('Update check timed out.')), 15000);
+      }),
+    ]);
     if (!update?.available) {
       if (manual) {
         statusHandler?.('latest');
@@ -31,6 +37,7 @@ export async function checkForUpdates(manual = false): Promise<void> {
     // Update checks are best-effort and must not interrupt app use while offline.
     if (manual) statusHandler?.('unavailable');
   } finally {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
     updateCheckInProgress = false;
   }
 }
@@ -51,10 +58,16 @@ const UpdateChecker: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    if (state !== 'latest' && state !== 'unavailable') return;
+    const timeoutId = window.setTimeout(() => setState(null), 2500);
+    return () => window.clearTimeout(timeoutId);
+  }, [state]);
+
   if (!state || state === 'checking' || state === 'latest' || state === 'unavailable') {
     return state === 'checking' || state === 'latest' || state === 'unavailable' ? (
-      <div className="fixed inset-x-0 top-0 z-50 flex justify-center px-4 pt-4" role="status" aria-live="polite">
-        <div className="rounded-lg bg-slate-800 px-5 py-3 text-sm font-medium text-white shadow-lg shadow-slate-950/30">
+      <div className="pointer-events-none fixed inset-x-0 top-0 z-50 flex justify-center px-4 pt-4" role="status" aria-live="polite">
+        <div className="pointer-events-auto rounded-lg bg-slate-800 px-5 py-3 text-sm font-medium text-white shadow-lg shadow-slate-950/30">
           {state === 'checking'
             ? 'Checking for updates...'
             : state === 'latest'
@@ -66,8 +79,8 @@ const UpdateChecker: React.FC = () => {
   }
 
   return (
-    <div className="fixed inset-x-0 top-0 z-50 flex justify-center px-4 pt-4" role="status" aria-live="polite">
-      <div className="flex items-center gap-4 rounded-lg bg-blue-600 px-5 py-3 text-sm font-medium text-white shadow-lg shadow-blue-950/30">
+    <div className="pointer-events-none fixed inset-x-0 top-0 z-50 flex justify-center px-4 pt-4" role="status" aria-live="polite">
+      <div className="pointer-events-auto flex items-center gap-4 rounded-lg bg-blue-600 px-5 py-3 text-sm font-medium text-white shadow-lg shadow-blue-950/30">
         <span>
           {state === 'downloading'
             ? `New version available (v${version}). Updating...`

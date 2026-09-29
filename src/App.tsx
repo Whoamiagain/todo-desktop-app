@@ -7,25 +7,29 @@ import AuthPage from './pages/AuthPage';
 import HomePage from './pages/HomePage';
 import ProjectDetailPage from './pages/ProjectDetailPage';
 import HistoryPage from './pages/HistoryPage';
+import DiaryPage from './pages/DiaryPage';
 import PrivacyPolicy from './pages/Legal/PrivacyPolicy';
 import TermsOfService from './pages/Legal/TermsOfService';
 import { ToastProvider } from './context/ToastContext';
 import UndoToast from './components/common/UndoToast';
 import UpdateChecker, { checkForUpdates } from './components/common/UpdateChecker';
+import { selectSql } from './lib/localDb';
 
-type ActiveView = 'home' | 'project-detail' | 'history';
+type ActiveView = 'home' | 'project-detail' | 'history' | 'diary';
 
 const AppHeader: React.FC<{
   onHome: () => void;
   onProject: () => void;
   onHistory: () => void;
+  onDiary: () => void;
+  isDiaryEnabled: boolean;
   isOnline: boolean;
   isSyncing: boolean;
   email?: string | null;
   onSync: () => void;
   onCheckForUpdates: () => void;
   onSignOut: () => void;
-}> = ({ onHome, onProject, onHistory, isOnline, isSyncing, email, onSync, onCheckForUpdates, onSignOut }) => {
+}> = ({ onHome, onProject, onHistory, onDiary, isDiaryEnabled, isOnline, isSyncing, email, onSync, onCheckForUpdates, onSignOut }) => {
   return (
     <header className="border-b border-slate-800 bg-brand-surface/70 backdrop-blur-md">
       <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-6 py-4">
@@ -35,6 +39,13 @@ const AppHeader: React.FC<{
             <button type="button" onClick={onHome} className="rounded-full px-3 py-1.5 transition hover:bg-slate-800">Home</button>
             <button type="button" onClick={onProject} className="rounded-full px-3 py-1.5 transition hover:bg-slate-800">Project</button>
             <button type="button" onClick={onHistory} className="rounded-full px-3 py-1.5 transition hover:bg-slate-800">History</button>
+            {isDiaryEnabled && (
+              <button type="button" onClick={onDiary} className="flex items-center gap-2 rounded-full border border-diary-border bg-diary-bg px-3 py-1.5 text-diary-accent transition hover:bg-diary-accent hover:text-white">
+                <span aria-hidden="true">❤️</span>
+                <span>Couple&apos;s Diary</span>
+                <span className="rounded-full bg-diary-accent px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">New</span>
+              </button>
+            )}
           </nav>
         </div>
 
@@ -70,6 +81,7 @@ const AppShell: React.FC = () => {
   const { user, signOut } = useAuth();
   const { isOnline, isSyncing, triggerSync } = useSync();
   const [activeView, setActiveView] = useState<ActiveView>('home');
+  const [isDiaryEnabled, setIsDiaryEnabled] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [showPrivacy, setShowPrivacy] = useState(false);
   const [showTOS, setShowTOS] = useState(false);
@@ -78,6 +90,17 @@ const AppShell: React.FC = () => {
     if (user) void triggerSync();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    void selectSql<{ value: string }>('SELECT value FROM app_metadata WHERE key = ?', ['is_diary_enabled'])
+      .then((rows) => {
+        const enabled = rows[0]?.value === 'true';
+        setIsDiaryEnabled(enabled);
+        if (!enabled && activeView === 'diary') setActiveView('home');
+      })
+      .catch(() => setIsDiaryEnabled(false));
+  }, [user, activeView]);
 
   if (!user) return null;
 
@@ -92,6 +115,8 @@ const AppShell: React.FC = () => {
           setActiveView('project-detail');
         }}
         onHistory={() => setActiveView('history')}
+        onDiary={() => setActiveView('diary')}
+        isDiaryEnabled={isDiaryEnabled}
         isOnline={isOnline}
         isSyncing={isSyncing}
         email={user?.email}
@@ -100,7 +125,11 @@ const AppShell: React.FC = () => {
         onSignOut={() => void signOut()}
       />
 
-      {isHome ? (
+      {activeView === 'diary' && isDiaryEnabled ? (
+        <main className="min-h-[calc(100vh-80px)] bg-diary-bg px-6 py-10">
+          <DiaryPage />
+        </main>
+      ) : isHome ? (
         <main className="w-full">
           <HomePage onOpenProject={(projectId) => {
             setSelectedProjectId(projectId);

@@ -1,5 +1,5 @@
 import Database from '@tauri-apps/plugin-sql';
-import type { OtherTask } from '../types';
+import type { Couple, DiaryEntry, OtherTask } from '../types';
 
 let db: Database | null = null;
 
@@ -95,6 +95,29 @@ export async function initLocalDb(): Promise<Database> {
     updated_at TEXT NOT NULL
   );`;
 
+  const createCouples = `CREATE TABLE IF NOT EXISTS couples (
+    id TEXT PRIMARY KEY,
+    user1_id TEXT NOT NULL,
+    user2_id TEXT,
+    invite_code TEXT UNIQUE NOT NULL,
+    status TEXT DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );`;
+
+  const createDiaryEntries = `CREATE TABLE IF NOT EXISTS diary_entries (
+    id TEXT PRIMARY KEY,
+    couple_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    date TEXT NOT NULL,
+    encrypted_body TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    UNIQUE(user_id, date)
+  );`;
+
   const createOutbox = `CREATE TABLE IF NOT EXISTS outbox_queue (
     id TEXT PRIMARY KEY,
     table_name TEXT NOT NULL,
@@ -117,6 +140,17 @@ export async function initLocalDb(): Promise<Database> {
     await connection.execute(createProjects);
     await connection.execute(createProjectTasks);
     await connection.execute(createDailyHistory);
+    await connection.execute(createCouples);
+    const coupleColumns = await connection.select('PRAGMA table_info(couples)') as unknown as Array<{ name: string }>;
+    if (!coupleColumns.some((column) => column.name === 'status')) {
+      await connection.execute("ALTER TABLE couples ADD COLUMN status TEXT DEFAULT 'active'");
+    }
+    const activeCouples = await connection.select('SELECT id FROM couples WHERE status = ? ORDER BY updated_at DESC') as unknown as Array<{ id: string }>;
+    for (const duplicateCouple of activeCouples.slice(1)) {
+      await connection.execute('UPDATE couples SET status = ? WHERE id = ?', ['unlinked', duplicateCouple.id]);
+    }
+    await connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_couples_single_active ON couples(status) WHERE status = 'active'");
+    await connection.execute(createDiaryEntries);
     // Older databases may already contain duplicate rows for the same logical day.
     await connection.execute(`
       DELETE FROM daily_history
@@ -162,6 +196,76 @@ export async function selectSql<T = unknown>(sql: string, params: unknown[] = []
   const db = getLocalDb();
   const rows = await db.select(sql, params);
   return rows as T[];
+}
+
+export async function setDiaryInstalled(enabled: boolean, userId: string): Promise<void> {
+  await executeSql('INSERT OR REPLACE INTO app_metadata (key, value) VALUES (?, ?)', ['is_diary_enabled', String(enabled)]);
+  if (!enabled) return;
+
+  const diaryTitle = "Write Daily Couple's Diary";
+  const existingTask = await selectSql<{ id: string }>(
+    'SELECT id FROM daily_tasks WHERE user_id = ? AND title = ? LIMIT 1',
+    [userId, diaryTitle],
+  );
+  if (existingTask.length > 0) return;
+
+  const now = new Date().toISOString();
+  await executeSql(
+    'INSERT INTO daily_tasks (id, user_id, title, active_days, is_completed, created_at, updated_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [createId(), userId, diaryTitle, '["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]', 0, now, now, null],
+  );
+}
+
+export async function getActiveCouple(): Promise<Couple | null> {
+  const rows = await selectSql<Couple>(
+    "SELECT * FROM couples WHERE status = 'active' LIMIT 1",
+  );
+  return rows[0] ?? null;
+}
+
+export async function saveLocalDiaryEntry(entry: DiaryEntry): Promise<void> {
+  const activeCouple = await getActiveCouple();
+  if (!activeCouple) throw new Error('Cannot create new entry: No active partner linked.');
+  entry.couple_id = activeCouple.id;
+
+  await executeSql(
+    `INSERT OR REPLACE INTO diary_entries
+      (id, couple_id, user_id, date, encrypted_body, iv, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [entry.id, entry.couple_id, entry.user_id, entry.date, entry.encrypted_body, entry.iv, entry.created_at, entry.updated_at, entry.deleted_at],
+  );
+}
+
+export async function getLocalDiaryEntries(coupleId: string): Promise<DiaryEntry[]> {
+  return selectSql<DiaryEntry>(
+    'SELECT * FROM diary_entries WHERE couple_id = ? AND deleted_at IS NULL ORDER BY date DESC, created_at DESC',
+    [coupleId],
+  );
+}
+
+export async function getAllLocalDiaryEntries(): Promise<DiaryEntry[]> {
+  return selectSql<DiaryEntry>('SELECT * FROM diary_entries ORDER BY date ASC');
+}
+
+export async function getCoupleRecord(userId: string): Promise<Couple | null> {
+  const rows = await selectSql<Couple>(
+    'SELECT * FROM couples WHERE user1_id = ? OR user2_id = ? ORDER BY updated_at DESC LIMIT 1',
+    [userId, userId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function saveCoupleRecord(couple: Couple): Promise<void> {
+  await executeSql(
+    `INSERT OR REPLACE INTO couples
+      (id, user1_id, user2_id, invite_code, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)` ,
+    [couple.id, couple.user1_id, couple.user2_id, couple.invite_code, couple.status ?? 'active', couple.created_at, couple.updated_at],
+  );
+}
+
+export async function unlinkCoupleLocally(coupleId: string): Promise<void> {
+  await executeSql('UPDATE couples SET status = ? WHERE id = ?', ['unlinked', coupleId]);
 }
 
 export async function getOtherTasks(userId: string): Promise<OtherTask[]> {
